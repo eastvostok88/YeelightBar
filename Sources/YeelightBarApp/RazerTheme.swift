@@ -192,21 +192,33 @@ struct RazerPulse: ViewModifier {
     }
 }
 
-/// Animated "⚡ YEELIGHT BAR" wordmark: the bolt flickers like lightning (a sharp double-flash with a
-/// white-hot peak + glow burst), and a sheen sweeps across the letters. One TimelineView clock drives
-/// it all, so it only animates while the window is actually on screen.
+/// Animated "⚡ YEELIGHT BAR" wordmark: the bolt glows and periodically strikes like lightning, and a
+/// sheen sweeps across the letters. Driven by Core Animation (repeatForever animations + a slow strike
+/// timer) rather than a per-frame TimelineView — so it composites on the GPU and burns ~no CPU, instead
+/// of re-running the SwiftUI view graph 60×/s (which pinned the CPU near 50 %).
 struct AnimatedWordmark: View {
-    var active: Bool                 // connected → full strikes; offline → a calm dim glow
+    var active: Bool                 // connected → strikes + glow breath; offline → a calm dim glow
     var boltSize: CGFloat = 12
     var textSize: CGFloat = 13
 
+    @State private var sweepPhase = 0.0  // sheen position; swept 0→1 once per strike, idle otherwise
+    @State private var flash = 0.0       // lightning strike: spikes then decays on each timer tick
+
+    // A strike every ~3.6 s — the ONLY periodic work; between strikes nothing animates, so idle CPU ≈ 0.
+    private let strikeTimer = Timer.publish(every: 3.6, on: .main, in: .common).autoconnect()
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
-            let s = Self.strike(t, active: active)          // 0 = rest, 1 = peak of a lightning flash
-            HStack(spacing: 8) {
-                bolt(s)
-                wordmark.overlay { sheen(t).mask(wordmark) } // moving highlight, clipped to the glyphs
+        HStack(spacing: 8) {
+            bolt
+            wordmark.overlay { sheen.mask(wordmark) }   // moving highlight, clipped to the glyphs
+        }
+        .onReceive(strikeTimer) { _ in
+            guard active else { return }
+            withAnimation(.easeIn(duration: 0.06)) { flash = 1 }                 // sharp white-hot flash
+            withAnimation(.easeOut(duration: 0.5).delay(0.08)) { flash = 0 }     // …then it decays
+            sweepPhase = 0                                                        // park the sheen off-left
+            DispatchQueue.main.async {                                            // next tick: sweep it across once
+                withAnimation(.easeInOut(duration: 0.9)) { sweepPhase = 1 }
             }
         }
     }
@@ -220,40 +232,28 @@ struct AnimatedWordmark: View {
         .font(.system(size: textSize, weight: .heavy)).tracking(2.5)
     }
 
-    private func bolt(_ s: Double) -> some View {
+    private var bolt: some View {
         ZStack {
             Image(systemName: "bolt.fill").foregroundStyle(Color.razerGreen)
-            Image(systemName: "bolt.fill").foregroundStyle(.white).opacity(s)   // white-hot at the flash
+            Image(systemName: "bolt.fill").foregroundStyle(.white).opacity(flash)   // white-hot at the strike
         }
         .font(.system(size: boltSize, weight: .black))
-        .scaleEffect(1 + 0.16 * s)
-        .shadow(color: Color.razerGreen.opacity(0.25 + 0.70 * s), radius: 3 + 12 * s)
+        .scaleEffect(1 + 0.16 * flash)
+        // Static glow (rasterized once); only the brief strike bumps the blur — no continuous blur redraw.
+        .shadow(color: Color.razerGreen.opacity(min(1, (active ? 0.55 : 0.20) + 0.4 * flash)),
+                radius: (active ? 6 : 3) + 8 * flash)
     }
 
-    private func sheen(_ t: Double) -> some View {
+    private var sheen: some View {
         GeometryReader { geo in
             let w = geo.size.width
-            let period = 3.4
-            let p = t.truncatingRemainder(dividingBy: period) / period          // 0..1 sweep cycle
             LinearGradient(colors: [.clear, .white.opacity(active ? 0.85 : 0.30), .clear],
                            startPoint: .leading, endPoint: .trailing)
                 .frame(width: w * 0.4)
-                .offset(x: -w * 0.5 + p * (w * 1.5))                             // travel off-left → off-right
+                .offset(x: -w * 0.5 + sweepPhase * (w * 1.5))   // parked off-screen at rest; sweeps on a strike
                 .blendMode(.plusLighter)
         }
         .allowsHitTesting(false)
-    }
-
-    /// Lightning intensity at time `t`: a sharp double-flash near the top of each cycle, a gentle
-    /// shimmer in between. Offline → just a slow dim breath, no strikes.
-    private static func strike(_ t: Double, active: Bool) -> Double {
-        guard active else { return 0.10 + 0.10 * (0.5 + 0.5 * sin(t * 1.4)) }
-        let ph = t.truncatingRemainder(dividingBy: 3.2)
-        if ph < 0.06 { return 1.0 }
-        if ph < 0.12 { return 0.45 }
-        if ph < 0.18 { return 0.92 }                                            // second flicker
-        if ph < 0.26 { return 0.30 }
-        return 0.16 + 0.10 * (0.5 + 0.5 * sin(t * 3))                           // resting shimmer
     }
 }
 
