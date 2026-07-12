@@ -14,5 +14,14 @@
       <enclosure url="https://github.com/Keprun/YeelightBar/releases/download/v0.2.6/YeelightBar-0.2.6.dmg" sparkle:edSignature="nQ6q14fk3UpmzTr05VOp/rvE5LqR2rK7+FN1tQGDhNAuBI5mvdC287Yt+6t4KrRG2aV1u+cuIoRHPToPns3wBg==" length="3149559" type="application/octet-stream"/>
     </item>
     <language>en</language>
+    <item>
+      <title>YeelightBar 0.2.7</title>
+      <pubDate>Sun, 12 Jul 2026 11:52:22 +0000</pubDate>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>0.2.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/Keprun/YeelightBar/releases/tag/v0.2.7</link>
+      <enclosure url="https://github.com/Keprun/YeelightBar/releases/download/v0.2.7/YeelightBar-0.2.7.dmg" sparkle:edSignature="n0upkCRTCLmI2wBRiSEpHt673iDDzHeH2FI6wegSOHE7YdXeyx4otcp38y1wS8IqlNAcN9Aat0rgtmTKjaCjCg==" length="3149621" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
