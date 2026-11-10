@@ -17,7 +17,8 @@ struct MenuPanelView: View {
         }
         .frame(width: 340)
         .background(RazerBackground())
-        .razerChrome()
+        .rgbGlass(radius: 16)
+        .razerChrome(light: lamp.glassLight)
     }
 
     // MARK: - Connected: control panel
@@ -42,7 +43,7 @@ struct MenuPanelView: View {
 
     // MARK: hero with a live lamp preview
 
-    private var glowColor: Color { (lamp.screenSyncOn || lamp.musicSyncOn) ? lamp.syncColor : lamp.ambientColor }
+    private var glowColor: Color { lamp.glassLight.color }
 
     private func warmthColor(_ k: Double) -> Color {
         let f = max(0, min(1, (k - 2700) / 3800))
@@ -172,6 +173,7 @@ struct MenuPanelView: View {
 
     private var effectSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            AmbientModeMenu(lamp: lamp, showsRules: false)
             Text("Эффект ambient").font(.caption).foregroundStyle(Color.razerSecondary)
             Picker("", selection: Binding(get: { lamp.syncMode }, set: { lamp.setSyncMode($0) })) {
                 Text("Выкл").tag(SyncMode.off)

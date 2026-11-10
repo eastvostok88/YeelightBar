@@ -11,7 +11,7 @@ mkdir -p "$APP/Contents/MacOS"
 cp "$PKG/.build/release/YeelightBarApp" "$APP/Contents/MacOS/YeelightBarApp"
 cp "$PKG/build-support/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
-cp "$PKG/build-support/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$PKG/build-support/AppIcon.icns" "$PKG/build-support/YeelightLogo.png" "$APP/Contents/Resources/"
 for lp in "$PKG"/build-support/localization/*.lproj; do
   [ -d "$lp" ] && cp -R "$lp" "$APP/Contents/Resources/"
 done

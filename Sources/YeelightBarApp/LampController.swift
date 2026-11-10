@@ -1,9 +1,17 @@
 import SwiftUI
 import AppKit
+import Combine
 import CoreGraphics
 import YeelightKit
 
 enum SyncMode: Hashable { case off, screen, music }
+enum AmbientCaptureSource: String, Hashable { case display, window, activeWindow }
+
+struct AmbientWindow: Identifiable {
+    let id: CGWindowID
+    let owner: pid_t
+    let title: String
+}
 
 struct DisplayInfo: Identifiable, Hashable {
     let id: CGDirectDisplayID
@@ -55,17 +63,28 @@ final class LampController: ObservableObject {
     @Published var syncColor = Color(rgb: 0x000000)
     @Published var regionColors: [CGDirectDisplayID: [SyncRegion: Color]] = [:]   // live colour per display+zone
     @Published var screenHasPermission = false
+    @Published private(set) var captureSource = AmbientCaptureSource(
+        rawValue: UserDefaults.standard.string(forKey: "ambientCaptureSource") ?? ""
+    ) ?? .display
+    @Published private(set) var captureWindows: [AmbientWindow] = []
+    @Published private(set) var captureWindowID: CGWindowID?
+    @Published private(set) var captureWindowTitle: String?
+    private var windowCaptureTargets: [SyncTarget]?
+    private var captureWindowOwner: pid_t?
+    private var streamingWindowID: CGWindowID?
+    private var windowWatch: Timer?
+    private var foregroundPID: pid_t?
     @Published var displays: [DisplayInfo] = []
     /// Which display each lamp samples for screen-sync (per-lamp; unset → main display).
     @Published var syncDisplays: [String: CGDirectDisplayID] = [:] {
-        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); sync.start(targets: syncTargets()) } }
+        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); startScreenCapture(targets: syncTargets()) } }
     }
     /// Addressable strips: per-lamp segment count (0/absent = whole-strip; >0 = per-segment ambilight via music mode).
     @Published var segmentCount: [String: Int] = [:] {
-        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); sync.start(targets: syncTargets()) } }
+        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); startScreenCapture(targets: syncTargets()) } }
     }
     @Published var segmentReversed: [String: Bool] = [:] {
-        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); sync.start(targets: syncTargets()) } }
+        didSet { if !suppressRegionRestart, screenSyncOn { sync.stop(); startScreenCapture(targets: syncTargets()) } }
     }
     @Published var syncBands: [String: Double] = [:] { didSet { pushGeoms() } }     // per-lamp capture depth
     @Published var syncLengths: [String: Double] = [:] { didSet { pushGeoms() } }   // per-lamp capture length (along the edge)
@@ -90,6 +109,23 @@ final class LampController: ObservableObject {
 
     private var device: YeelightDevice?
     private var ambientWork: DispatchWorkItem?
+    private var backlightOutput: SyncOutput?
+    @Published private(set) var playingBacklightEffect: BacklightEffect?
+    @Published private(set) var startingBacklightEffect = false
+    @Published private var backlightFrame: (rgb: Int, elapsed: Double)?
+
+    var glassLight: GlassLight {
+        guard connected, ambientOn else { return GlassLight(color: .razerGreen) }
+        if let effect = playingBacklightEffect, let backlightFrame {
+            return GlassLight(color: Color(rgb: backlightFrame.rgb), palette: effect.colors.map(Color.init(rgb:)),
+                              rotation: (backlightFrame.elapsed * 24).truncatingRemainder(dividingBy: 360))
+        }
+        return GlassLight(color: screenSyncOn || musicSyncOn ? syncColor : ambientColor)
+    }
+    @Published private(set) var backlightEffectError: String?
+    @Published private(set) var savedBacklightEffects =
+        (UserDefaults.standard.data(forKey: "backlightEffects.v1")
+            .flatMap { try? JSONDecoder().decode([BacklightEffect].self, from: $0) }) ?? []
     private var lastBrightSend = Date.distantPast
     private var lumaEMA = -1.0   // smoothed scene luma for brightness-follow (-1 = unseeded)
     private var pollTimer: Timer?
@@ -113,8 +149,26 @@ final class LampController: ObservableObject {
     private let savedIDKey = "selectedDeviceID"
     private let savedIPKey = "selectedDeviceIP"
 
+    @Published private(set) var ambientSelection: AmbientMode?
+    @Published private(set) var ambientAutomatic = false
+    @Published private(set) var ambientModeStatus: String?
+    @Published private(set) var ambientRules = LampController.loadAmbientRules()
+    private var ambientContext = AmbientContext()
+    private var ambientTransition: Task<Void, Never>?
+    private var ambientObservers: Set<AnyCancellable> = []
+    private var foregroundBundleID: String?
+    private var workColor: Color?
+    private var systemSleeping = false
+
+    private static let ambientRulesKey = "ambientAppRules.v1"
+
+
     init() {
-        sync.onState = { [weak self] running, err in self?.screenSyncOn = running; self?.screenSyncStatus = err }
+        sync.onState = { [weak self] running, error in
+            guard let self, self.screenSyncOn else { return }
+            self.screenSyncStatus = error
+            if !running, self.windowCaptureTargets == nil { self.screenSyncOn = false }
+        }
         sync.onRegionColors = { [weak self] d in
             guard let self else { return }
             guard d != self.lastRegionSnap else { return }   // skip the @Published churn when nothing changed
@@ -159,11 +213,13 @@ final class LampController: ObservableObject {
         keyboard.refresh()
         refreshScreenPermission()
         refreshDisplays()
+        if captureSource == .window { refreshCaptureWindows() }
         // react live to a monitor being plugged in / unplugged / rearranged
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refreshDisplays() }
         }
+        observeAmbientContext()
         restoreOnLaunch()
     }
 
@@ -251,6 +307,7 @@ final class LampController: ObservableObject {
 
     /// Explicit "connect": focus on ONE device — it becomes the primary and the only group member.
     func connect(to d: DiscoveredDevice?) {
+        stopBacklightEffect()
         guard let d else { return }
         stopScreenSync()
         stopMusicSync()
@@ -274,6 +331,7 @@ final class LampController: ObservableObject {
     /// Add/remove a device from the control group (multi-select "mix"). The first member becomes
     /// the primary; removing the primary re-points it to another member (or disconnects if empty).
     func toggleGroup(_ d: DiscoveredDevice) {
+        stopBacklightEffect()
         if groupIPs.contains(d.ip) {
             groupIPs.remove(d.ip)
             if selected?.ip == d.ip {
@@ -326,10 +384,24 @@ final class LampController: ObservableObject {
                 selected = nil; device = nil; connected = false
             }
         }
-        if groupIPs != before, screenSyncOn || musicSyncOn { restartSync() }
+        if groupIPs != before {
+            stopBacklightEffect()
+            if screenSyncOn || musicSyncOn { restartSync() }
+        }
     }
 
-    func backToDevices() { pollTimer?.invalidate(); pollTimer = nil; connected = false }
+    func backToDevices() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        pollEpoch &+= 1
+        ambientWork?.cancel()
+        stopBacklightEffect()
+        stopScreenSync()
+        stopMusicSync()
+        connected = false
+        connecting = false
+        device = nil
+    }
 
     func refresh() {
         guard let device else { connecting = false; return }
@@ -337,7 +409,7 @@ final class LampController: ObservableObject {
         io.async {
             let props = (try? device.properties(["power", "bright", "ct", "bg_rgb", "bg_power", "rgb", "main_power"])) ?? []
             Task { @MainActor in
-                guard self.selected?.ip == ip else { return }   // primary re-pointed / group emptied mid-read
+                guard self.device === device else { return }   // ignore a superseded connection
                 self.connecting = false
                 guard props.count >= 4 else {
                     self.connected = false
@@ -348,6 +420,7 @@ final class LampController: ObservableObject {
                 self.connectError = nil
                 self.apply(props)
                 self.startPollTimer()
+                self.applyAmbientSelectionIfNeeded()
             }
         }
     }
@@ -382,7 +455,7 @@ final class LampController: ObservableObject {
     /// be ON — a deliberately powered-off lamp that also drops off WiFi must not trigger reconnect.
     private func tickPoll() {
         guard let device, connected, !isSearching else { return }   // don't probe mid-scan — overlapping connections wedge the lamp
-        let expectOn = power
+        let expectOn = power || ambientOn
         let epoch = pollEpoch
         io.async {
             let props = (try? device.properties(["power", "bright", "ct", "bg_rgb", "bg_power", "rgb", "main_power"])) ?? []
@@ -392,7 +465,7 @@ final class LampController: ObservableObject {
                     self.pollMisses = 0
                     // Don't fight live sync: bg_rgb/bright are being driven ~20 Hz, so re-applying
                     // them here would snap the colour/brightness controls every tick.
-                    if !(self.screenSyncOn || self.musicSyncOn) { self.apply(props) }
+                    if !(self.screenSyncOn || self.musicSyncOn), self.backlightOutput == nil { self.apply(props) }
                 } else if expectOn {
                     self.pollMisses += 1
                     if self.pollMisses >= 3 { self.handleLost() }   // ~3 misses ≈ 36 s of silence
@@ -403,13 +476,14 @@ final class LampController: ObservableObject {
 
     /// Lamp stopped answering (offline or DHCP IP changed) — re-discover by stable id and reconnect.
     private func handleLost() {
+        stopBacklightEffect()
         pollTimer?.invalidate(); pollTimer = nil
         pollMisses = 0
         stopScreenSync(); stopMusicSync()
         if keyboardSyncOn {              // keyboard ambilight is lamp-independent — keep it alive while the lamp reconnects
             pushKeyboardAux(); keyboard.beginSession()
             screenSyncOn = true; screenSyncStatus = nil
-            sync.start(targets: [])
+            startScreenCapture(targets: [])
         }
         connected = false
         connectError = "Связь с лампой потеряна — переподключаюсь…"
@@ -498,7 +572,12 @@ final class LampController: ObservableObject {
     /// Master power for every group member: front white + ambient together.
     func togglePower() {
         let target = !masterOn
-        if !target { stopScreenSync(); stopMusicSync() }
+        if !target {
+            stopBacklightEffect()
+            clearAmbientSelection()
+            ambientWork?.cancel()
+            stopScreenSync(); stopMusicSync()
+        }
         power = target; ambientOn = target
         let v = target ? "on" : "off"
         fanOut { dev, isBar in
@@ -511,7 +590,10 @@ final class LampController: ObservableObject {
     /// Front white channel only (the bar's main light); on a strip this is the whole light.
     func setFrontPower(_ on: Bool) {
         power = on
-        if !selectedIsBar { ambientOn = on }
+        if !selectedIsBar {
+            if !on { stopBacklightEffect(); clearAmbientSelection(); ambientWork?.cancel() }
+            ambientOn = on
+        }
         let v = on ? "on" : "off"
         fanOut { dev, _ in self.send(dev, "set_power", [v, "smooth", 300]) }
         scheduleResync()
@@ -519,6 +601,13 @@ final class LampController: ObservableObject {
 
     /// Debounced colour push — coalesces drags so we stay under the lamp's ~60 cmd/min TCP quota.
     func setAmbient(_ c: Color) {
+        clearAmbientSelection()
+        workColor = c
+        applyAmbientColor(c)
+    }
+
+    private func applyAmbientColor(_ c: Color) {
+        stopBacklightEffect()
         if screenSyncOn { stopScreenSync() }   // a static colour replaces live screen-sync…
         if musicSyncOn { stopMusicSync() }     // …and the beat, else they fight over the channel
         ambientColor = c
@@ -541,6 +630,76 @@ final class LampController: ObservableObject {
     }
     func pushBrightness() { let v = max(1, min(100, Int(brightness))); fanOut { dev, _ in self.send(dev, "set_bright", [v, "smooth", 300]) } }
     func pushColorTemp() { let k = max(1700, min(6500, Int(colorTempK))); fanOut { dev, _ in self.send(dev, "set_ct_abx", [k, "smooth", 300]) } }
+
+    func playBacklightEffect(_ effect: BacklightEffect) {
+        guard connected, !systemSleeping else { return }
+        let shouldTurnOn = !ambientOn
+        stopBacklightEffect()
+        clearAmbientSelection()
+        stopScreenSync()
+        stopMusicSync()
+        ambientWork?.cancel()
+        let targets = syncTargets().map { target in
+            var solid = target
+            solid.segments = 0
+            return solid
+        }
+        guard !targets.isEmpty else { return }
+        let output = SyncOutput(targets)
+        backlightOutput = output
+        playingBacklightEffect = effect
+        startingBacklightEffect = true
+        output.play(effect, onReady: { [weak self, weak output] ready in
+            Task { @MainActor in
+                guard let self, let output, self.backlightOutput === output else { return }
+                if ready {
+                    if shouldTurnOn {
+                        self.ambientOn = true
+                        self.ensureColourChannelsOn()
+                    }
+                    self.startingBacklightEffect = false
+                } else {
+                    self.stopBacklightEffect()
+                    self.backlightEffectError = "Лампа не открыла канал подсветки. Попробуй ещё раз."
+                }
+            }
+        }, onColor: { [weak self, weak output] rgb, elapsed in
+            Task { @MainActor in
+                guard let self, let output, self.backlightOutput === output else { return }
+                self.backlightFrame = (rgb, elapsed)
+            }
+        })
+    }
+
+    func stopBacklightEffect() {
+        backlightOutput?.closeStream()
+        backlightOutput = nil
+        if let backlightFrame { ambientColor = Color(rgb: backlightFrame.rgb) }
+        backlightFrame = nil
+        playingBacklightEffect = nil
+        startingBacklightEffect = false
+        backlightEffectError = nil
+    }
+
+    func saveBacklightEffect(_ effect: BacklightEffect) {
+        if let index = savedBacklightEffects.firstIndex(where: { $0.id == effect.id }) {
+            savedBacklightEffects[index] = effect
+        } else {
+            savedBacklightEffects.append(effect)
+        }
+        persistBacklightEffects()
+    }
+
+    func removeBacklightEffect(_ id: UUID) {
+        savedBacklightEffects.removeAll { $0.id == id }
+        persistBacklightEffects()
+    }
+
+    private func persistBacklightEffects() {
+        if let data = try? JSONEncoder().encode(savedBacklightEffects) {
+            UserDefaults.standard.set(data, forKey: "backlightEffects.v1")
+        }
+    }
 
     // MARK: - Custom scenes (user-saved ambient colours, persisted)
     func addScene(_ name: String) {
@@ -573,6 +732,7 @@ final class LampController: ObservableObject {
         }
     }
     private func enterIdleDim() {
+        stopBacklightEffect()
         idleDimmed = true
         preIdleBright = brightness
         idleEffect = screenSyncOn ? .screen : (musicSyncOn ? .music : .none)   // remember to resume on wake
@@ -591,6 +751,11 @@ final class LampController: ObservableObject {
             self.send(dev, "set_bright", [v, "smooth", 800])
             if isBar { self.send(dev, "bg_set_bright", [v, "smooth", 800]) }
         }
+        if ambientSelection != nil {
+            idleEffect = .none
+            applyAmbientSelectionIfNeeded()
+            return
+        }
         switch idleEffect {   // the dim paused the effect — bring it back the way the user left it
         case .screen: toggleScreenSync()
         case .music:  toggleMusicSync()
@@ -601,11 +766,17 @@ final class LampController: ObservableObject {
 
     /// Independent on/off for the colour channel (bar = bg channel, strip = its only channel).
     func setAmbientPower(_ on: Bool) {
-        if !on { stopScreenSync(); stopMusicSync() }   // colour off → stop any running sync
+        if !on {
+            stopBacklightEffect()
+            clearAmbientSelection()
+            ambientWork?.cancel()
+            stopScreenSync(); stopMusicSync()
+        }
         ambientOn = on
         if !selectedIsBar { power = on }               // single-channel device: colour power == device power
         let v = on ? "on" : "off"
         fanOut { dev, isBar in self.send(dev, isBar ? "bg_set_power" : "set_power", [v, "smooth", 300]) }
+        if on { applyAmbientSelectionIfNeeded() }
     }
 
     func applyScene(ct: Int, bright: Int) {
@@ -617,9 +788,92 @@ final class LampController: ObservableObject {
         scheduleResync()
     }
 
+    // MARK: - Screen source
+
+    func setCaptureSource(_ source: AmbientCaptureSource) {
+        guard captureSource != source else { return }
+        captureSource = source
+        UserDefaults.standard.set(source.rawValue, forKey: "ambientCaptureSource")
+        if source == .window { refreshCaptureWindows() }
+        if screenSyncOn { restartSync() }
+    }
+
+    func selectCaptureWindow(_ id: CGWindowID?) {
+        guard captureWindowID != id else { return }
+        captureWindowID = id
+        captureWindowOwner = captureWindows.first { $0.id == id }?.owner
+        updateWindowCapture()
+    }
+
+    func refreshCaptureWindows() {
+        captureWindows = Self.visibleCaptureWindows()
+    }
+
+    private static func visibleCaptureWindows() -> [AmbientWindow] {
+        // The Window Server returns front-to-back order. Restrict to normal, visible windows
+        // so menus, floating tools and our own controls never become the capture source.
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                   kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        return list.compactMap { info in
+            guard let id = info[kCGWindowNumber as String] as? CGWindowID,
+                  let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner != ownPID,
+                  info[kCGWindowLayer as String] as? Int == 0,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Double],
+                  (bounds["Width"] ?? 0) >= 80, (bounds["Height"] ?? 0) >= 60 else { return nil }
+            let app = info[kCGWindowOwnerName as String] as? String ?? "Window"
+            let name = info[kCGWindowName as String] as? String
+            return AmbientWindow(id: id, owner: owner,
+                                 title: name.flatMap { $0.isEmpty ? nil : app + " — " + $0 } ?? app + " #\(id)")
+        }
+    }
+
+    private func startScreenCapture(targets: [SyncTarget]) {
+        windowWatch?.invalidate()
+        windowWatch = nil
+        windowCaptureTargets = nil
+        streamingWindowID = nil
+        captureWindowTitle = nil
+        if captureSource == .display {
+            sync.start(targets: targets)
+            return
+        }
+        windowCaptureTargets = targets
+        updateWindowCapture()
+        windowWatch = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateWindowCapture() }
+        }
+    }
+
+    private func updateWindowCapture() {
+        guard let targets = windowCaptureTargets, screenSyncOn else { return }
+        let windows = Self.visibleCaptureWindows()
+        let window: AmbientWindow?
+        switch captureSource {
+        case .display: return
+        case .window: window = windows.first { $0.id == captureWindowID && $0.owner == captureWindowOwner }
+        case .activeWindow: window = windows.first { $0.owner == foregroundPID }
+        }
+        if captureWindowTitle != window?.title { captureWindowTitle = window?.title }
+        if window == nil {
+            screenSyncStatus = captureSource == .window
+                ? "Выбранное окно недоступно. Открой или выбери окно."
+                : "У активного приложения нет доступного окна."
+        }
+        guard streamingWindowID != window?.id else { return }
+        sync.stop()
+        streamingWindowID = window?.id
+        if let window {
+            screenSyncStatus = "Запуск…"
+            sync.start(targets: targets, windowID: window.id)
+        }
+    }
+
     // MARK: - Screen sync (ambilight)
 
     func toggleScreenSync() {
+        stopBacklightEffect()
         if screenSyncOn { stopScreenSync(); return }   // sync off — ambient stays as a static colour
         let targets = syncTargets()
         let lampsReady = !targets.isEmpty && connected && selected != nil
@@ -636,7 +890,7 @@ final class LampController: ObservableObject {
         screenSyncStatus = "Запуск…"
         pushKeyboardAux()
         if keyboardSyncOn { keyboard.beginSession() }
-        sync.start(targets: lampsReady ? targets : [])   // keyboard-only runs the engine with no lamps
+        startScreenCapture(targets: lampsReady ? targets : [])   // keyboard-only runs the engine with no lamps
     }
 
     /// The keyboard follows whatever effect is active: screen → its zone, music → the beat colour.
@@ -661,6 +915,11 @@ final class LampController: ObservableObject {
     }
 
     func stopScreenSync() {
+        windowWatch?.invalidate()
+        windowWatch = nil
+        windowCaptureTargets = nil
+        streamingWindowID = nil
+        captureWindowTitle = nil
         let wasOn = screenSyncOn
         sync.stop()
         screenSyncOn = false
@@ -671,6 +930,7 @@ final class LampController: ObservableObject {
     // MARK: - Music sync
 
     func toggleMusicSync() {
+        stopBacklightEffect()
         if musicSyncOn { stopMusicSync(); return }
         guard selected != nil, connected else {
             musicSyncStatus = "Сначала подключись к лампе."
@@ -759,10 +1019,152 @@ final class LampController: ObservableObject {
             } else {
                 if !t.isEmpty { ensureColourChannelsOn() }
                 pushKeyboardAux()
-                sync.stop(); sync.start(targets: t)
+                sync.stop(); startScreenCapture(targets: t)
             }
         }
         if musicSyncOn { ensureColourChannelsOn(); music.stop(); music.start(targets: syncTargets()) }
+    }
+
+    // MARK: - Contextual ambient lighting
+
+    private static func loadAmbientRules() -> AmbientAppRules {
+        guard let data = UserDefaults.standard.data(forKey: ambientRulesKey),
+              let rules = try? JSONDecoder().decode(AmbientAppRules.self, from: data) else {
+            return AmbientAppRules()
+        }
+        return rules
+    }
+
+    func setAmbientRule(_ mode: AmbientMode?, for bundleID: String) {
+        ambientRules.byBundleID[bundleID] = mode
+        if let data = try? JSONEncoder().encode(ambientRules) {
+            UserDefaults.standard.set(data, forKey: Self.ambientRulesKey)
+        }
+        scheduleAmbientTransition()
+    }
+
+    private func observeAmbientContext() {
+        let workspace = NSWorkspace.shared
+        if let app = workspace.frontmostApplication,
+           app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            foregroundBundleID = app.bundleIdentifier
+            foregroundPID = app.processIdentifier
+        }
+        let notifications = workspace.notificationCenter
+        notifications.publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .sink { [weak self] event in
+                guard let app = event.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+                let bundleID = app.bundleIdentifier
+                let pid = app.processIdentifier
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.foregroundBundleID = bundleID
+                    self.foregroundPID = pid
+                    self.updateWindowCapture()
+                    self.scheduleAmbientTransition()
+                }
+            }.store(in: &ambientObservers)
+        notifications.publisher(for: NSWorkspace.willSleepNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.systemSleeping = true
+                    self.stopBacklightEffect()
+                    self.ambientTransition?.cancel()
+                    if self.ambientSelection != nil { self.stopScreenSync() }
+                }
+            }.store(in: &ambientObservers)
+        notifications.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.systemSleeping = false
+                    guard let mode = self.ambientSelection else { return }
+                    if self.ambientAutomatic {
+                        self.ambientContext = AmbientContext(active: mode, isAutomatic: true)
+                        self.scheduleAmbientTransition()
+                        if self.ambientContext.deadline != nil { return }
+                    }
+                    self.applyAmbientSelectionIfNeeded()
+                }
+            }.store(in: &ambientObservers)
+    }
+
+    func selectAmbientMode(_ mode: AmbientMode) {
+        clearAmbientSelection()
+        ambientContext.selectManually(mode)
+        ambientSelection = mode
+        if workColor == nil, connected { workColor = ambientColor }
+        applyAmbientSelectionIfNeeded()
+    }
+
+    func enableAutomaticAmbient() {
+        clearAmbientSelection()
+        if connected { workColor = workColor ?? ambientColor }
+        let mode = ambientRules.mode(for: foregroundBundleID)
+        ambientContext = AmbientContext(active: mode, isAutomatic: true)
+        ambientSelection = mode
+        ambientAutomatic = true
+        applyAmbientSelectionIfNeeded()
+    }
+
+    func clearAmbientSelection() {
+        ambientTransition?.cancel()
+        ambientTransition = nil
+        if ambientSelection != nil {
+            sync.setSmoothing(syncSmoothing)
+            sync.setSnapCuts(snapCuts)
+            sync.setSkipBlackBars(skipBlackBars)
+        }
+        ambientContext = AmbientContext()
+        ambientSelection = nil
+        ambientAutomatic = false
+        ambientModeStatus = nil
+    }
+
+    private func scheduleAmbientTransition() {
+        guard ambientAutomatic, !systemSleeping else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let previousDeadline = ambientContext.deadline
+        ambientContext.observe(ambientRules.mode(for: foregroundBundleID), at: now)
+        guard ambientContext.deadline != previousDeadline else { return }
+        ambientTransition?.cancel()
+        guard let deadline = ambientContext.deadline else { return }
+        ambientTransition = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, deadline - now))) }
+            catch { return }
+            guard let self, self.ambientAutomatic, !self.systemSleeping,
+                  let mode = self.ambientContext.advance(at: ProcessInfo.processInfo.systemUptime) else { return }
+            self.ambientSelection = mode
+            self.applyAmbientSelectionIfNeeded()
+        }
+    }
+
+    private func applyAmbientSelectionIfNeeded() {
+        guard let mode = ambientSelection, !systemSleeping, !idleDimmed else { return }
+        guard connected, ambientOn else {
+            ambientModeStatus = "Ожидание включённой подсветки"
+            return
+        }
+        ambientModeStatus = nil
+        if workColor == nil { workColor = ambientColor }
+        ambientWork?.cancel()
+        if mode == .work {
+            applyAmbientColor(workColor ?? ambientColor)
+            return
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            screenHasPermission = false
+            applyAmbientColor(workColor ?? ambientColor)
+            ambientModeStatus = "Для этого режима нужен доступ к записи экрана"
+            return
+        }
+        screenHasPermission = true
+        sync.setSmoothing(mode == .game ? 0.65 : 0.22)
+        sync.setSnapCuts(mode == .game)
+        sync.setSkipBlackBars(mode == .cinema)
+        applySyncMode(.screen)
     }
 
     // MARK: - Effect mode (single off / screen / music selector)
@@ -770,6 +1172,12 @@ final class LampController: ObservableObject {
     var syncMode: SyncMode { screenSyncOn ? .screen : (musicSyncOn ? .music : .off) }
 
     func setSyncMode(_ mode: SyncMode) {
+        stopBacklightEffect()
+        clearAmbientSelection()
+        applySyncMode(mode)
+    }
+
+    private func applySyncMode(_ mode: SyncMode) {
         switch mode {
         case .off:
             if screenSyncOn { toggleScreenSync() }
@@ -784,7 +1192,9 @@ final class LampController: ObservableObject {
     }
 
     func refreshScreenPermission() {
+        let wasAllowed = screenHasPermission
         screenHasPermission = CGPreflightScreenCaptureAccess()
+        if wasAllowed != screenHasPermission { applyAmbientSelectionIfNeeded() }
     }
 
     /// Enumerate attached displays (synchronous CoreGraphics — no Screen-Recording permission needed)
@@ -812,7 +1222,7 @@ final class LampController: ObservableObject {
             suppressRegionRestart = true
             syncDisplays = syncDisplays.filter { live.contains($0.value) }
             suppressRegionRestart = false
-            if screenSyncOn { sync.stop(); sync.start(targets: syncTargets()) }
+            if screenSyncOn { sync.stop(); startScreenCapture(targets: syncTargets()) }
         }
     }
 

@@ -14,6 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "YeelightKit"),
+        .testTarget(name: "YeelightKitTests", dependencies: ["YeelightKit"]),
         .executableTarget(name: "yeectl", dependencies: ["YeelightKit"]),
         .executableTarget(
             name: "YeelightBarApp",

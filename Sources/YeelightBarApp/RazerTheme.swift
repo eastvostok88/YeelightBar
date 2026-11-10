@@ -112,65 +112,110 @@ extension Color {
     static var razerHairline: Color  { pal.accent.opacity(0.30) }
 }
 
-/// Razer's angular panel geometry: a rect with the top-left and bottom-right corners sliced off.
-struct ChamferedRectangle: Shape {
-    var cut: CGFloat = 9
-    func path(in r: CGRect) -> Path {
-        let c = min(cut, min(r.width, r.height) / 2)
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX + c, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - c))
-        p.addLine(to: CGPoint(x: r.maxX - c, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))
-        p.closeSubpath()
-        return p
+/// Shared optical tint. Views use the same sample regardless of their position in the app.
+struct GlassLight {
+    var color: Color
+    var palette: [Color] = []
+    var rotation: Double = 0
+
+    var reflections: [Color] {
+        [color] + (palette.isEmpty ? [color, color] : Array(palette.prefix(8)))
     }
 }
 
-/// Dark/light Razer backdrop: green top-glow + faint scanlines (much subtler in light mode).
+private struct GlassLightKey: EnvironmentKey {
+    static var defaultValue: GlassLight { GlassLight(color: .razerGreen) }
+}
+
+private extension EnvironmentValues {
+    var glassLight: GlassLight {
+        get { self[GlassLightKey.self] }
+        set { self[GlassLightKey.self] = newValue }
+    }
+}
+
 struct RazerBackground: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.glassLight) private var light
+
     var body: some View {
         let dark = scheme == .dark
         ZStack {
-            LinearGradient(colors: [.razerBGTop, .razerBG], startPoint: .top, endPoint: .bottom)
-            // two accent auras (theme-coloured) for depth — a strong top-left glow + a soft bottom-right one
-            RadialGradient(colors: [Color.razerGreen.opacity(dark ? 0.18 : 0.06), .clear],
-                           center: .topLeading, startRadius: 0, endRadius: 540)
-            RadialGradient(colors: [Color.razerGreen.opacity(dark ? 0.10 : 0.03), .clear],
-                           center: .bottomTrailing, startRadius: 0, endRadius: 480)
+            (dark ? Color(white: 0.077) : Color(white: 0.95))
+            RadialGradient(colors: [light.color.opacity(dark ? 0.16 : 0.10), .clear],
+                           center: .topTrailing, startRadius: 4, endRadius: 480)
             Canvas { ctx, size in
-                let op = dark ? 0.16 : 0.05
-                var y: CGFloat = 0
-                while y < size.height {
-                    ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: y)); $0.addLine(to: CGPoint(x: size.width, y: y)) },
-                               with: .color(.black.opacity(op)), lineWidth: 0.5)
-                    y += 3
+                var dots = Path()
+                for x in stride(from: 8.0, to: size.width, by: 12) {
+                    for y in stride(from: 8.0, to: size.height, by: 12) {
+                        dots.addEllipse(in: CGRect(x: x, y: y, width: 1, height: 1))
+                    }
                 }
+                ctx.fill(dots, with: .color(dark ? .white.opacity(0.08) : .black.opacity(0.08)))
             }
-            .allowsHitTesting(false)
         }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
         .ignoresSafeArea()
     }
 }
 
-/// Razer panel: chamfered surface, thin neon hairline, UPPERCASE green caption.
+private struct RGBGlass: ViewModifier {
+    var radius: CGFloat
+    var prominent: Bool
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.glassLight) private var light
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let dark = scheme == .dark
+        let bright = prominent ? 0.96 : 0.70
+        let reflections = light.reflections.flatMap { tint in
+            [tint.opacity(bright), tint.opacity(0.10)]
+        }
+        let spectrum = AngularGradient(colors: reflections + Array(reflections.prefix(1)),
+                                       center: .center, angle: .degrees(reduceMotion ? 0 : light.rotation))
+        return content
+            .background {
+                if reduceTransparency {
+                    shape.fill(dark ? Color(white: 0.13) : .white)
+                } else {
+                    if prominent { shape.fill(.regularMaterial) }
+                    shape.fill(dark ? Color(white: 0.11).opacity(0.88) : .white.opacity(0.87))
+                    shape.fill(RadialGradient(colors: [light.color.opacity(prominent ? 0.23 : 0.13), .clear],
+                                              center: .topLeading, startRadius: 0, endRadius: 200))
+                }
+            }
+            .overlay {
+                ZStack {
+                    if !reduceTransparency {
+                        shape.strokeBorder(spectrum, lineWidth: prominent ? 5 : 3)
+                            .opacity(0.22)
+                    }
+                    shape.strokeBorder(spectrum, lineWidth: prominent ? 1.5 : 1)
+                    shape.inset(by: 2).strokeBorder(
+                        LinearGradient(colors: [.white.opacity(dark ? 0.19 : 0.85), .clear, .white.opacity(0.10)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+    }
+}
+
 struct RazerGroupBoxStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             configuration.label
-                .font(.system(size: 10.5, weight: .heavy))
-                .textCase(.uppercase).tracking(1.6)
-                .foregroundStyle(Color.razerGreen)
+                .font(.headline)
+                .foregroundStyle(.primary)
             configuration.content
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.razerSurface)
-        .clipShape(ChamferedRectangle(cut: 11))
-        .overlay(ChamferedRectangle(cut: 11).stroke(Color.razerHairline, lineWidth: 1))
+        .rgbGlass(radius: 17)
     }
 }
 
@@ -192,68 +237,32 @@ struct RazerPulse: ViewModifier {
     }
 }
 
-/// Animated "⚡ YEELIGHT BAR" wordmark: the bolt glows and periodically strikes like lightning, and a
-/// sheen sweeps across the letters. Driven by Core Animation (repeatForever animations + a slow strike
-/// timer) rather than a per-frame TimelineView — so it composites on the GPU and burns ~no CPU, instead
-/// of re-running the SwiftUI view graph 60×/s (which pinned the CPU near 50 %).
-struct AnimatedWordmark: View {
-    var active: Bool                 // connected → strikes + glow breath; offline → a calm dim glow
-    var boltSize: CGFloat = 12
-    var textSize: CGFloat = 13
+struct YeelightBrandMark: View {
+    var size: CGFloat = 20
+    private static let logo = Bundle.main.url(forResource: "YeelightLogo", withExtension: "png")
+        .flatMap { NSImage(contentsOf: $0) }
 
-    @State private var sweepPhase = 0.0  // sheen position; swept 0→1 once per strike, idle otherwise
-    @State private var flash = 0.0       // lightning strike: spikes then decays on each timer tick
+    var body: some View {
+        Group {
+            if let logo = Self.logo {
+                Image(nsImage: logo).resizable().scaledToFit()
+            }
+        }.frame(width: size, height: size).accessibilityHidden(true)
+    }
+}
 
-    // A strike every ~3.6 s — the ONLY periodic work; between strikes nothing animates, so idle CPU ≈ 0.
-    private let strikeTimer = Timer.publish(every: 3.6, on: .main, in: .common).autoconnect()
+struct GlassWordmark: View {
+    var logoSize: CGFloat = 20
+    var textSize: CGFloat = 14
 
     var body: some View {
         HStack(spacing: 8) {
-            bolt
-            wordmark.overlay { sheen.mask(wordmark) }   // moving highlight, clipped to the glyphs
+            YeelightBrandMark(size: logoSize)
+            Text(verbatim: "YEELIGHT")
+                .font(.system(size: textSize, weight: .bold, design: .rounded))
+                .tracking(1.2)
+                .foregroundStyle(.primary)
         }
-        .onReceive(strikeTimer) { _ in
-            guard active else { return }
-            withAnimation(.easeIn(duration: 0.06)) { flash = 1 }                 // sharp white-hot flash
-            withAnimation(.easeOut(duration: 0.5).delay(0.08)) { flash = 0 }     // …then it decays
-            sweepPhase = 0                                                        // park the sheen off-left
-            DispatchQueue.main.async {                                            // next tick: sweep it across once
-                withAnimation(.easeInOut(duration: 0.9)) { sweepPhase = 1 }
-            }
-        }
-    }
-
-    /// The static logotype — reused as both the visible text and the sheen mask.
-    private var wordmark: some View {
-        HStack(spacing: 8) {
-            Text("YEELIGHT").foregroundStyle(Color.razerText)
-            Text("BAR").foregroundStyle(Color.razerGreen)
-        }
-        .font(.system(size: textSize, weight: .heavy)).tracking(2.5)
-    }
-
-    private var bolt: some View {
-        ZStack {
-            Image(systemName: "bolt.fill").foregroundStyle(Color.razerGreen)
-            Image(systemName: "bolt.fill").foregroundStyle(.white).opacity(flash)   // white-hot at the strike
-        }
-        .font(.system(size: boltSize, weight: .black))
-        .scaleEffect(1 + 0.16 * flash)
-        // Static glow (rasterized once); only the brief strike bumps the blur — no continuous blur redraw.
-        .shadow(color: Color.razerGreen.opacity(min(1, (active ? 0.55 : 0.20) + 0.4 * flash)),
-                radius: (active ? 6 : 3) + 8 * flash)
-    }
-
-    private var sheen: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            LinearGradient(colors: [.clear, .white.opacity(active ? 0.85 : 0.30), .clear],
-                           startPoint: .leading, endPoint: .trailing)
-                .frame(width: w * 0.4)
-                .offset(x: -w * 0.5 + sweepPhase * (w * 1.5))   // parked off-screen at rest; sweeps on a strike
-                .blendMode(.plusLighter)
-        }
-        .allowsHitTesting(false)
     }
 }
 
@@ -265,20 +274,24 @@ extension View {
             .foregroundStyle(Color.razerText)
     }
 
-    /// HUD telemetry readout: monospaced green value in a bordered chip.
+    /// Compact glass readout; the shared lighting colours the rim and the text stays legible.
     func razerHUD() -> some View {
-        self.font(.system(size: 11, weight: .bold, design: .monospaced))
-            .foregroundStyle(Color.razerGreen)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(Color.razerGreen.opacity(0.12))
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.razerGreen.opacity(0.4), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 3))
+        self.font(.system(size: 11, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .rgbGlass(radius: 6)
     }
 
     func razerPulse(_ active: Bool, color: Color = .razerGreen) -> some View { modifier(RazerPulse(active: active, color: color)) }
 
     /// Apply the Razer look — green accent + panel style. Follows the system Light/Dark/Auto theme.
-    func razerChrome() -> some View {
+    func rgbGlass(radius: CGFloat = 14, prominent: Bool = false) -> some View {
+        modifier(RGBGlass(radius: radius, prominent: prominent))
+    }
+
+    func razerChrome(light: GlassLight) -> some View {
         self.tint(.razerGreen).groupBoxStyle(RazerGroupBoxStyle())
+            .environment(\.glassLight, light)
     }
 }

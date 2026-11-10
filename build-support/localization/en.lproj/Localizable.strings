@@ -158,3 +158,78 @@
 /* Updates (Sparkle) */
 "Проверить обновления…" = "Check for Updates…";
 "Обновляться автоматически" = "Update automatically";
+
+/* Contextual ambient modes */
+"Работа" = "Work";
+"Игра" = "Game";
+"Кино" = "Cinema";
+"Без профиля" = "No profile";
+"Авто · %@" = "Auto · %@";
+"Режим подсветки" = "Ambient mode";
+"Правила" = "Rules";
+"Запущенные приложения" = "Running apps";
+"Назначенные правила" = "Assigned rules";
+"Удалить правило" = "Remove rule";
+"Ожидание включённой подсветки" = "Waiting for the backlight to be on";
+"Для этого режима нужен доступ к записи экрана" = "This mode requires screen recording access";
+"Разрешение на захват экрана" = "Screen recording settings";
+"Плавность и обработку чёрных полос задаёт режим подсветки." = "The ambient mode controls smoothing and black-bar handling.";
+
+"Источник Ambilight" = "Ambilight source";
+"Выбранное окно" = "Selected window";
+"Активное окно" = "Active window";
+"Окно" = "Window";
+"Выбрать окно" = "Choose a window";
+"Обновить окна" = "Refresh windows";
+"Окно недоступно" = "Window unavailable";
+"Окно недоступно для захвата." = "The window is unavailable for capture.";
+"Выбранное окно недоступно. Открой или выбери окно." = "The selected window is unavailable. Open it or choose another one.";
+"У активного приложения нет доступного окна." = "The active app has no available window.";
+"Все лампы получают цвет из выбранного источника. Зоны считаются внутри окна." = "All lamps use this source. Sampling zones are relative to the window.";
+
+/* Backlight effect editor */
+"Сцены подсветки" = "Backlight scenes";
+"Стоп" = "Stop";
+"Мои эффекты" = "My effects";
+"Конструктор эффектов" = "Effect editor";
+"Название эффекта" = "Effect name";
+"Рисунок" = "Pattern";
+"Добавить цвет" = "Add color";
+"Убрать последний цвет" = "Remove last color";
+"Период" = "Cycle duration";
+"Интенсивность" = "Intensity";
+"Обратный порядок цветов" = "Reverse color order";
+"Запустить" = "Play";
+"Сохранить эффект" = "Save effect";
+"Лампа не открыла канал подсветки. Попробуй ещё раз." = "The lamp did not open the backlight stream. Try again.";
+
+"Сплошной цвет" = "Solid color";
+"Запуск эффекта…" = "Starting effect…";
+"Сейчас играет" = "Now playing";
+"Нажми на сцену, чтобы запустить её." = "Click a scene to play it.";
+"Подключи лампу в разделе «Устройства»." = "Connect a lamp in Devices.";
+"Запустить эффект" = "Play effect";
+"Редактировать эффект" = "Edit effect";
+"Редактировать эффект %@" = "Edit %@";
+"Предпросмотр" = "Preview";
+
+"Сохранить копию" = "Save a copy";
+
+/* Device setup */
+"Подключи лампу Yeelight" = "Connect your Yeelight";
+"Подготовь лампу на телефоне, затем найди её с Mac." = "Set up the lamp on your phone, then find it on your Mac.";
+"Найти лампу" = "Find a lamp";
+"Как подключить лампу" = "How to connect a lamp";
+"Установи Yeelight Classic" = "Install Yeelight Classic";
+"Скачай приложение Yeelink на iPhone или Android." = "Download the Yeelink app for iPhone or Android.";
+"Подключи лампу к Wi‑Fi" = "Connect the lamp to Wi-Fi";
+"Подай питание на лампу. В Yeelight Classic нажми «+», выбери свою модель и следуй подсказкам. Для Screen Light Bar Pro выбери сеть 2,4 ГГц и введи пароль Wi‑Fi." = "Power on the lamp. In Yeelight Classic, tap +, pick your model and follow the prompts. For Screen Light Bar Pro, choose a 2.4 GHz network and enter its Wi-Fi password.";
+"Включи LAN Control" = "Enable LAN Control";
+"В Yeelight Classic открой «Устройства» → свою лампу → «Ещё» → «Управление по LAN» (LAN Control). Включи переключатель." = "In Yeelight Classic, open Devices, select your lamp, then open More → LAN Control. Turn the switch on.";
+"Найди лампу в YeelightBar" = "Find the lamp in YeelightBar";
+"Mac и лампа должны быть в одной домашней сети. Если macOS запросит доступ к локальной сети, разреши его. Запусти поиск и выбери лампу в списке." = "Keep your Mac and lamp on the same home network. Allow local network access if macOS asks. Start a scan and choose your lamp from the list.";
+"Лампа не находится?" = "Can't find the lamp?";
+"Проверь, что Mac в той же сети, лампа онлайн в Yeelight Classic, а LAN Control включён. Гостевая сеть может изолировать устройства." = "Check that your Mac is on the same network, the lamp is online in Yeelight Classic, and LAN Control is on. Guest Wi-Fi can isolate devices.";
+"Если поиск не нашёл лампу, посмотри её IP в списке устройств роутера и введи его в «Добавить вручную по IP». Для подключения по IP тоже нужен LAN Control." = "If the scan misses the lamp, look up its IP in your router's device list and use Add manually by IP. Connecting by IP also requires LAN Control.";
+"Если переключателя LAN Control нет, проверь поддержку у своей модели в инструкции Yeelight." = "If there is no LAN Control switch, check the Yeelight instructions for your model.";
+"Инструкция по LAN Control" = "Yeelight LAN Control instructions";

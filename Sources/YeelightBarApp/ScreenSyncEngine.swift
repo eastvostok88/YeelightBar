@@ -29,6 +29,7 @@ struct ZoneGeom { var band = 0.25; var length = 1.0; var center = 0.5 }
 final class SyncOutput {
     private let targets: [(device: YeelightDevice, displayID: CGDirectDisplayID, region: SyncRegion, segments: Int, reversed: Bool)]
     private let io = DispatchQueue(label: "yeelightbar.syncoutput")
+    private var effectTimer: DispatchSourceTimer?
     private let music: [String: YeelightMusicSession]   // ip → music session (addressable per-segment targets)
     // Derived once from the immutable targets — looked up per frame on the capture hot path, so cached.
     private let allDisplayIDs: Set<CGDirectDisplayID>
@@ -61,6 +62,39 @@ final class SyncOutput {
     /// Highest segment count among addressable targets on (display, region); 0 if none are segmented.
     func maxSegments(on display: CGDirectDisplayID, _ region: SyncRegion) -> Int { maxSegByDisplayRegion[display]?[region] ?? 0 }
 
+    func play(_ effect: BacklightEffect, onReady: @escaping (Bool) -> Void, onColor: @escaping (Int, Double) -> Void) {
+        io.async {
+            let devices = self.targets.map { $0.device }
+            for device in devices { _ = try? device.openStream(timeout: 0.8) }
+            let ready = devices.contains { $0.streamToken != nil }
+            onReady(ready)
+            guard ready else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.io)
+            let start = ProcessInfo.processInfo.systemUptime
+            var lastKeepAlive = start
+            var lastUIUpdate = start - 0.125
+            var lastUIRGB: Int?
+            timer.schedule(deadline: .now(), repeating: .milliseconds(50), leeway: .milliseconds(8))
+            timer.setEventHandler { [weak self] in
+                guard self != nil else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                let rgb = effect.rgb(at: now - start)
+                if now - lastKeepAlive >= 8 {
+                    for device in devices { device.keepAlive() }
+                    lastKeepAlive = now
+                }
+                for device in devices { device.stream(rgb: rgb) }
+                if now - lastUIUpdate >= 0.125, rgb != lastUIRGB {
+                    lastUIUpdate = now
+                    lastUIRGB = rgb
+                    onColor(rgb, now - start)
+                }
+            }
+            self.effectTimer = timer
+            timer.resume()
+        }
+    }
+
     func openStream() {
         io.async { self.targets.forEach { if $0.segments == 0 { _ = try? $0.device.openStream(timeout: 1.5) } } }
         music.values.forEach { $0.start() }
@@ -86,7 +120,11 @@ final class SyncOutput {
     }
     func keepAlive() { io.async { self.targets.forEach { if $0.segments == 0 { $0.device.keepAlive() } } } }
     func closeStream() {
-        io.async { self.targets.forEach { if $0.segments == 0 { $0.device.closeStream() } } }
+        io.async {
+            self.effectTimer?.cancel()
+            self.effectTimer = nil
+            self.targets.forEach { if $0.segments == 0 { $0.device.closeStream() } }
+        }
         music.values.forEach { $0.stop() }
     }
 }
@@ -138,7 +176,7 @@ final class ScreenSyncEngine: NSObject, SCStreamOutput {
     private var frameCount = 0
     private var generation = 0
 
-    func start(targets: [SyncTarget]) {
+    func start(targets: [SyncTarget], windowID: CGWindowID? = nil) {
         queue.async {
             self.generation += 1
             let gen = self.generation
@@ -150,7 +188,7 @@ final class ScreenSyncEngine: NSObject, SCStreamOutput {
             self.geoms = Self.geomMap(targets)
             o.openStream()
             self.startKeepAlive()
-            self.beginCapture(gen: gen, displays: o.displayIDs.union(self.auxDisplay.map { [$0] } ?? []))
+            self.beginCapture(gen: gen, displays: o.displayIDs.union(self.auxDisplay.map { [$0] } ?? []), windowID: windowID)
         }
     }
 
@@ -175,7 +213,7 @@ final class ScreenSyncEngine: NSObject, SCStreamOutput {
 
     // MARK: - Capture setup
 
-    private func beginCapture(gen: Int, displays: Set<CGDirectDisplayID>) {
+    private func beginCapture(gen: Int, displays: Set<CGDirectDisplayID>, windowID: CGWindowID?) {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
             self.queue.async {
                 guard gen == self.generation else { return }
@@ -186,35 +224,30 @@ final class ScreenSyncEngine: NSObject, SCStreamOutput {
                 }
                 guard let content else { self.teardown(); self.report(false, "Не удалось получить список экранов."); return }
 
-                for did in displays {
-                    // fall back to the main display if a target's chosen screen was unplugged
-                    guard let scd = content.displays.first(where: { $0.displayID == did })
-                                 ?? content.displays.first(where: { $0.displayID == CGMainDisplayID() })
-                                 ?? content.displays.first else { continue }
-                    let pid = scd.displayID
-                    if let existing = self.streamsByDisplay[pid] {       // same physical screen already captured → reuse it
-                        self.displayByStream[ObjectIdentifier(existing), default: []].insert(did)
-                        continue
+                if let windowID {
+                    guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                        self.teardown()
+                        self.report(false, "Окно недоступно для захвата.")
+                        return
                     }
-                    let config = Self.config(for: scd)
-                    let stream = SCStream(filter: SCContentFilter(display: scd, excludingApplications: [], exceptingWindows: []),
-                                          configuration: config, delegate: nil)
-                    do {
-                        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
-                    } catch { continue }
-                    self.displayByStream[ObjectIdentifier(stream)] = [did]
-                    self.streamsByDisplay[pid] = stream
-                    stream.startCapture { err in
-                        self.queue.async {
-                            guard gen == self.generation else { stream.stopCapture(completionHandler: { _ in }); return }
-                            if err != nil {
-                                self.streamsByDisplay[pid] = nil
-                                self.displayByStream[ObjectIdentifier(stream)] = nil
-                                if self.streamsByDisplay.isEmpty {        // every capture failed → unwind, don't zombie
-                                    self.teardown(); self.report(false, "Не удалось начать захват экрана.")
-                                }
-                            }
+                    self.startStream(key: 0, displays: displays,
+                                     filter: SCContentFilter(desktopIndependentWindow: window),
+                                     config: Self.config(width: window.frame.width, height: window.frame.height),
+                                     generation: gen)
+                } else {
+                    for did in displays {
+                        guard let display = content.displays.first(where: { $0.displayID == did })
+                                         ?? content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                                         ?? content.displays.first else { continue }
+                        let key = display.displayID
+                        if let existing = self.streamsByDisplay[key] {
+                            self.displayByStream[ObjectIdentifier(existing), default: []].insert(did)
+                            continue
                         }
+                        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+                        self.startStream(key: key, displays: [did], filter: filter,
+                                         config: Self.config(width: Double(display.width), height: Double(display.height)),
+                                         generation: gen)
                     }
                 }
 
@@ -227,10 +260,35 @@ final class ScreenSyncEngine: NSObject, SCStreamOutput {
         }
     }
 
-    private static func config(for display: SCDisplay) -> SCStreamConfiguration {
-        // Resolution-independent: scale the longer edge to a fixed target, keep the exact aspect.
-        let dw = max(1, display.width), dh = max(1, display.height)
-        let scale = 192.0 / Double(max(dw, dh))
+    private func startStream(key: CGDirectDisplayID, displays: Set<CGDirectDisplayID>,
+                             filter: SCContentFilter, config: SCStreamConfiguration, generation gen: Int) {
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        do {
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        } catch { return }
+        displayByStream[ObjectIdentifier(stream)] = displays
+        streamsByDisplay[key] = stream
+        stream.startCapture { error in
+            self.queue.async {
+                guard gen == self.generation else {
+                    stream.stopCapture(completionHandler: { _ in })
+                    return
+                }
+                if error != nil {
+                    self.streamsByDisplay[key] = nil
+                    self.displayByStream[ObjectIdentifier(stream)] = nil
+                    if self.streamsByDisplay.isEmpty {
+                        self.teardown()
+                        self.report(false, "Не удалось начать захват экрана.")
+                    }
+                }
+            }
+        }
+    }
+
+    private static func config(width: Double, height: Double) -> SCStreamConfiguration {
+        let dw = max(1, width), dh = max(1, height)
+        let scale = 192.0 / max(dw, dh)
         func even(_ x: Double) -> Int { let n = max(16, Int(x.rounded())); return n - (n % 2) }
         let config = SCStreamConfiguration()
         config.width = even(Double(dw) * scale)

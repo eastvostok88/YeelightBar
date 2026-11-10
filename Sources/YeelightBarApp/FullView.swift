@@ -55,7 +55,7 @@ struct FullView: View {
                     .listStyle(.sidebar)
                     .scrollContentBackground(.hidden)
                 }
-                .background(Color.razerBG)
+                .background(RazerBackground())
                 .navigationSplitViewColumnWidth(min: 200, ideal: 215, max: 250)
             } detail: {
                 ZStack {
@@ -72,7 +72,7 @@ struct FullView: View {
         }
         .frame(minWidth: 820, idealWidth: 880, minHeight: 580, idealHeight: 680)
         .background(WindowConfigurator())
-        .razerChrome()
+        .razerChrome(light: lamp.glassLight)
         .onAppear { lamp.refreshScreenPermission(); lamp.refreshDisplays() }
     }
 
@@ -81,7 +81,7 @@ struct FullView: View {
     private var titleBar: some View {
         HStack(spacing: 8) {
             Spacer().frame(width: 70)                       // keep clear of the traffic-light buttons
-            AnimatedWordmark(active: lamp.connected)
+            GlassWordmark()
             Spacer()
             Button { section = .settings } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 13))
@@ -96,22 +96,19 @@ struct FullView: View {
                     .foregroundStyle(Color.razerSecondary)
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Color.razerSurface, in: Capsule())
-            .overlay(Capsule().stroke(Color.razerHairline, lineWidth: 1))
+            .rgbGlass(radius: 14)
             .padding(.trailing, 14)
         }
         .frame(height: 42)
         .frame(maxWidth: .infinity)
         .background(WindowDragArea())   // drag the window by the title bar (frontmost background, behind the buttons)
-        .background(LinearGradient(colors: [.razerBGTop, .razerBG], startPoint: .top, endPoint: .bottom))
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.razerGreen.opacity(0.45)).frame(height: 1) }
+        .background(RazerBackground())
+        .rgbGlass(radius: 12)
     }
 
     private var sidebarHeader: some View {
         HStack(spacing: 10) {
-            Image(systemName: "bolt.fill").font(.title3)
-                .foregroundStyle(Color.razerGreen)
-                .razerPulse(lamp.connected)
+            YeelightBrandMark(size: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(lamp.connected ? name(lamp.selected) : "YEELIGHTBAR")
                     .razerHeading(13).lineLimit(1)
@@ -144,11 +141,21 @@ struct FullView: View {
     }
 
     private var notConnected: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Лампа не подключена").font(.title3).bold()
-            Text("Открой раздел «Устройства», найди лампу и подключись.").foregroundStyle(Color.razerSecondary)
-            Button("Перейти к устройствам") { section = .devices }.buttonStyle(.borderedProminent)
-        }
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Подключи лампу Yeelight").font(.largeTitle.weight(.semibold))
+            Text("Подготовь лампу на телефоне, затем найди её с Mac.")
+                .foregroundStyle(Color.razerSecondary)
+            DeviceSetupGuide()
+            HStack {
+                Button {
+                    section = .devices
+                    if !lamp.isSearching, !lamp.connecting { lamp.autoSearch() }
+                } label: {
+                    Label("Найти лампу", systemImage: "antenna.radiowaves.left.and.right")
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                Button("Перейти к устройствам") { section = .devices }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: sections
@@ -241,7 +248,7 @@ struct FullView: View {
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 10) {
-                AnimatedWordmark(active: true, boltSize: 22, textSize: 22)
+                GlassWordmark(logoSize: 22, textSize: 22)
                 HStack(spacing: 8) {
                     Text(String(format: NSLocalizedString("Версия %@", comment: ""), appVersion)).razerHUD()
                     Text(verbatim: "MIT").razerHUD()
@@ -402,8 +409,10 @@ struct FullView: View {
             }.toggleStyle(.switch)
             GroupBox("Цвет подсветки") {
                 VStack(alignment: .leading, spacing: 16) {
+                    BacklightEffectEditor(lamp: lamp)
+                    Divider()
                     HStack {
-                        Text("Текущий цвет").font(.callout).foregroundStyle(Color.razerSecondary)
+                        Text("Сплошной цвет").font(.callout).foregroundStyle(Color.razerSecondary)
                         Spacer()
                         Button { pickScreenColor() } label: { Image(systemName: "eyedropper") }
                             .buttonStyle(.borderless).help("Взять цвет с экрана")
@@ -419,9 +428,11 @@ struct FullView: View {
                     }.frame(height: 28).clipShape(RoundedRectangle(cornerRadius: 14))
                     HStack(spacing: 14) {
                         ForEach(presets, id: \.self) { c in
-                            RoundedRectangle(cornerRadius: 8).fill(c).frame(width: 40, height: 40)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.25)))
-                                .onTapGesture { lamp.setAmbient(c) }
+                            Button { lamp.setAmbient(c) } label: {
+                                RoundedRectangle(cornerRadius: 8).fill(c).frame(width: 34, height: 34)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.25)))
+                            }.buttonStyle(.borderless)
+                                .accessibilityLabel(Text(String(format: "#%06X", c.rgbInt)))
                         }
                         Spacer()
                     }
@@ -432,6 +443,36 @@ struct FullView: View {
 
     private var effectsSection: some View {
         VStack(alignment: .leading, spacing: 18) {
+            AmbientModeMenu(lamp: lamp, showsRules: true)
+            Picker("Источник Ambilight", selection: Binding(get: { lamp.captureSource }, set: { lamp.setCaptureSource($0) })) {
+                Text("Монитор").tag(AmbientCaptureSource.display)
+                Text("Выбранное окно").tag(AmbientCaptureSource.window)
+                Text("Активное окно").tag(AmbientCaptureSource.activeWindow)
+            }
+            if lamp.captureSource == .window {
+                HStack {
+                    Picker("Окно", selection: Binding(get: { lamp.captureWindowID }, set: { lamp.selectCaptureWindow($0) })) {
+                        Text("Выбрать окно").tag(CGWindowID?.none)
+                        if let id = lamp.captureWindowID, !lamp.captureWindows.contains(where: { $0.id == id }) {
+                            Text("Окно недоступно").tag(Optional(id))
+                        }
+                        ForEach(lamp.captureWindows) { window in
+                            Text(window.title).tag(Optional(window.id))
+                        }
+                    }
+                    Button("Обновить окна") { lamp.refreshCaptureWindows() }
+                }
+            }
+            if lamp.captureSource != .display {
+                Text("Все лампы получают цвет из выбранного источника. Зоны считаются внутри окна.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let title = lamp.captureWindowTitle {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+            }
+            if lamp.captureSource != .display, !lamp.screenHasPermission {
+                Button("Разрешение на захват экрана") { lamp.openScreenSettings() }
+            }
             Picker("Эффект", selection: Binding(get: { lamp.syncMode }, set: { lamp.setSyncMode($0) })) {
                 Text("Выкл").tag(SyncMode.off)
                 Text("Экран").tag(SyncMode.screen)
@@ -515,9 +556,15 @@ struct FullView: View {
                 GroupBox("Настройка") {
                     VStack(alignment: .leading, spacing: 16) {
                         Toggle("Яркость следует за яркостью сцены", isOn: $lamp.brightnessFollow)
-                        Toggle("Мгновенно на резких сменах сцен", isOn: $lamp.snapCuts)
-                        Toggle("Игнорировать чёрные полосы (letterbox)", isOn: $lamp.skipBlackBars)
-                        slider("Плавность", $lamp.syncSmoothing, 0.1...0.8, { "\(Int($0 * 100))%" })
+                        Group {
+                            Toggle("Мгновенно на резких сменах сцен", isOn: $lamp.snapCuts)
+                            Toggle("Игнорировать чёрные полосы (letterbox)", isOn: $lamp.skipBlackBars)
+                            slider("Плавность", $lamp.syncSmoothing, 0.1...0.8, { "\(Int($0 * 100))%" })
+                        }.disabled(lamp.ambientSelection != nil)
+                        if lamp.ambientSelection != nil {
+                            Text("Плавность и обработку чёрных полос задаёт режим подсветки.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         slider("Насыщенность", $lamp.syncSaturation, 1.0...2.0, { String(format: "%.1f×", $0) })
                     }.padding(10)
                 }
@@ -602,6 +649,10 @@ struct FullView: View {
             }.buttonStyle(.borderedProminent).controlSize(.large).disabled(lamp.isSearching)
 
             if let err = lamp.connectError { Text(LocalizedStringKey(err)).font(.callout).foregroundStyle(.red) }
+
+            DisclosureGroup("Как подключить лампу") {
+                DeviceSetupGuide().padding(.top, 10)
+            }
 
             GroupBox("Найденные лампы") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -903,5 +954,337 @@ private struct WindowConfigurator: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         // Re-apply the backing colour on every SwiftUI update so a live theme switch re-tints the window.
         DispatchQueue.main.async { nsView.window?.backgroundColor = NSColor(Color.razerBG) }
+    }
+}
+
+
+/// Shared by the full window and the menu-bar panel so overrides behave identically.
+struct AmbientModeMenu: View {
+    @ObservedObject var lamp: LampController
+    let showsRules: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Menu {
+                    Button("Авто") { lamp.enableAutomaticAmbient() }
+                    ForEach(AmbientMode.allCases, id: \.self) { mode in
+                        Button(mode.title) { lamp.selectAmbientMode(mode) }
+                    }
+                    Divider()
+                    Button("Без профиля") { lamp.clearAmbientSelection() }
+                } label: {
+                    if lamp.ambientAutomatic, let mode = lamp.ambientSelection {
+                        Text("Авто · \(mode.label)")
+                    } else if let mode = lamp.ambientSelection {
+                        Text(mode.title)
+                    } else {
+                        Text("Режим подсветки")
+                    }
+                }
+                if showsRules {
+                    Menu("Правила") {
+                        Section("Запущенные приложения") {
+                            ForEach(runningApps, id: \.id) { app in
+                                Menu(app.name) {
+                                    ForEach(AmbientMode.allCases, id: \.self) { mode in
+                                        Button(mode.title) { lamp.setAmbientRule(mode, for: app.id) }
+                                    }
+                                }
+                            }
+                        }
+                        Section("Назначенные правила") {
+                            ForEach(lamp.ambientRules.byBundleID.keys.sorted(), id: \.self) { id in
+                                if let mode = lamp.ambientRules.byBundleID[id] {
+                                    Menu("\(appName(for: id)) · \(mode.label)") {
+                                        Button("Удалить правило") { lamp.setAmbientRule(nil, for: id) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let status = lamp.ambientModeStatus {
+                Text(LocalizedStringKey(status)).font(.caption).foregroundStyle(.secondary)
+                if lamp.connected, lamp.ambientOn, !lamp.screenHasPermission, lamp.ambientSelection != .work {
+                    Button("Разрешение на захват экрана") { lamp.openScreenSettings() }
+                }
+            }
+        }
+    }
+
+    private var runningApps: [(id: String, name: String)] {
+        var names: [String: String] = [:]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                  let id = app.bundleIdentifier else { continue }
+            names[id] = app.localizedName ?? id
+        }
+        return names.map { (id: $0.key, name: $0.value) }.sorted { $0.name < $1.name }
+    }
+
+    private func appName(for id: String) -> String {
+        runningApps.first(where: { $0.id == id })?.name ?? id
+    }
+}
+
+private extension AmbientMode {
+    var title: LocalizedStringKey {
+        switch self {
+        case .work: return "Работа"
+        case .game: return "Игра"
+        case .cinema: return "Кино"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .work: return NSLocalizedString("Работа", comment: "")
+        case .game: return NSLocalizedString("Игра", comment: "")
+        case .cinema: return NSLocalizedString("Кино", comment: "")
+        }
+    }
+}
+
+
+private struct BacklightEffectEditor: View {
+    @ObservedObject var lamp: LampController
+    @State private var draft: BacklightEffect?
+    private let columns = [GridItem(.adaptive(minimum: 140), spacing: 10)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Сцены подсветки").font(.headline)
+                Spacer()
+                if lamp.playingBacklightEffect != nil {
+                    Button { lamp.stopBacklightEffect() } label: {
+                        Label("Стоп", systemImage: "stop.fill")
+                    }
+                }
+            }
+
+            if let playing = lamp.playingBacklightEffect {
+                HStack(spacing: 8) {
+                    if lamp.startingBacklightEffect {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "waveform").foregroundStyle(Color.razerGreen)
+                    }
+                    Text(LocalizedStringKey(lamp.startingBacklightEffect ? "Запуск эффекта…" : "Сейчас играет"))
+                        .foregroundStyle(Color.razerSecondary)
+                    Text(playing.name).fontWeight(.semibold)
+                }.font(.callout)
+            } else if let error = lamp.backlightEffectError {
+                Label(LocalizedStringKey(error), systemImage: "exclamationmark.circle")
+                    .font(.callout).foregroundStyle(.orange)
+            } else {
+                Text(LocalizedStringKey(lamp.connected ? "Нажми на сцену, чтобы запустить её." : "Подключи лампу в разделе «Устройства»."))
+                    .font(.callout).foregroundStyle(Color.razerSecondary)
+            }
+
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(BacklightEffect.presets) { effect in
+                    card(effect, isPreset: true)
+                }
+            }
+            if !lamp.savedBacklightEffects.isEmpty {
+                Text("Мои эффекты").font(.subheadline.weight(.semibold)).padding(.top, 4)
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(lamp.savedBacklightEffects) { effect in
+                        card(effect, isPreset: false)
+                    }
+                }
+            }
+        }
+        .sheet(item: $draft) { effect in
+            BacklightEffectSettings(lamp: lamp, effect: effect)
+        }
+    }
+
+    private func card(_ effect: BacklightEffect, isPreset: Bool) -> some View {
+        let active = lamp.playingBacklightEffect?.id == effect.id
+        return HStack(spacing: 4) {
+            Button {
+                if active { lamp.stopBacklightEffect() }
+                else { lamp.playBacklightEffect(effect) }
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    let colors = effect.colors.isEmpty ? [0xFFFFFF] : effect.colors
+                    let ordered = effect.reversed ? Array(colors.prefix(1)) + colors.dropFirst().reversed() : colors
+                    LinearGradient(colors: (ordered + ordered.prefix(1)).map(Color.init(rgb:)),
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(height: 14)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .accessibilityHidden(true)
+                    HStack(spacing: 5) {
+                        Image(systemName: active ? "waveform" : "play.fill")
+                            .font(.caption2)
+                            .foregroundStyle(active ? Color.razerGreen : Color.razerSecondary)
+                            .accessibilityHidden(true)
+                        Text(effect.name).font(.callout.weight(.medium)).foregroundStyle(Color.razerText).lineLimit(2)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(.vertical, 8)
+                .padding(.leading, 9)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!lamp.connected)
+            .accessibilityLabel(Text(effect.name))
+            .accessibilityValue(active ? Text("Сейчас играет") : Text(""))
+            .help(LocalizedStringKey(active ? "Стоп" : "Запустить эффект"))
+
+            Button {
+                var copy = effect
+                if isPreset { copy.id = UUID() }
+                draft = copy
+            } label: {
+                Image(systemName: "pencil").frame(width: 26, height: 30)
+            }
+            .buttonStyle(.borderless)
+            .help("Редактировать эффект")
+            .accessibilityLabel(Text("Редактировать эффект \(effect.name)"))
+        }
+        .padding(.trailing, 4)
+        .rgbGlass(radius: 12, prominent: active)
+    }
+}
+
+private struct BacklightEffectSettings: View {
+    @ObservedObject var lamp: LampController
+    @Environment(\.dismiss) private var dismiss
+    @State private var effect: BacklightEffect
+    @State private var previewed = false
+
+    init(lamp: LampController, effect: BacklightEffect) {
+        self.lamp = lamp
+        _effect = State(initialValue: effect)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Конструктор эффектов").font(.title2.weight(.semibold))
+            Form {
+                TextField("Название эффекта", text: $effect.name)
+                Picker("Рисунок", selection: $effect.pattern) {
+                    ForEach(BacklightEffect.Pattern.allCases, id: \.self) { pattern in
+                        Text(pattern.rawValue.capitalized).tag(pattern)
+                    }
+                }
+                HStack(spacing: 8) {
+                    ForEach(effect.colors.indices, id: \.self) { index in
+                        ColorPicker("Цвет \(index + 1)", selection: Binding(
+                            get: { Color(rgb: effect.colors.indices.contains(index) ? effect.colors[index] : 0) },
+                            set: { color in
+                                guard effect.colors.indices.contains(index) else { return }
+                                effect.colors[index] = color.rgbInt
+                            }
+                        ), supportsOpacity: false).labelsHidden()
+                    }
+                    Button { effect.colors.append(effect.colors.last ?? 0xFFFFFF) } label: {
+                        Image(systemName: "plus")
+                    }.disabled(effect.colors.count >= 8).help("Добавить цвет").accessibilityLabel("Добавить цвет")
+                    Button { _ = effect.colors.popLast() } label: {
+                        Image(systemName: "minus")
+                    }.disabled(effect.colors.count <= 1).help("Убрать последний цвет").accessibilityLabel("Убрать последний цвет")
+                }
+                LabeledContent("Период") {
+                    HStack {
+                        Slider(value: $effect.seconds, in: 2...30, step: 0.5) { Text("Период") }.labelsHidden()
+                        Text("\(effect.seconds, specifier: "%.1f") с").monospacedDigit().frame(minWidth: 54, alignment: .trailing)
+                    }
+                }.disabled(effect.pattern == .steady)
+                LabeledContent("Интенсивность") {
+                    HStack {
+                        Slider(value: $effect.intensity, in: 0.1...1) { Text("Интенсивность") }.labelsHidden()
+                        Text("\(Int(effect.intensity * 100))%").monospacedDigit().frame(minWidth: 54, alignment: .trailing)
+                    }
+                }
+                Toggle("Обратный порядок цветов", isOn: $effect.reversed)
+                    .disabled(effect.pattern == .steady || effect.colors.count < 2)
+            }
+            if let error = lamp.backlightEffectError {
+                Text(LocalizedStringKey(error)).font(.callout).foregroundStyle(.orange)
+            }
+            HStack {
+                Button("Предпросмотр") {
+                    previewed = true
+                    lamp.playBacklightEffect(effect)
+                }.disabled(!lamp.connected)
+                if lamp.playingBacklightEffect?.id == effect.id {
+                    Button("Стоп") { lamp.stopBacklightEffect() }
+                }
+                Spacer()
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(LocalizedStringKey(lamp.savedBacklightEffects.contains(where: { $0.id == effect.id })
+                    ? "Сохранить эффект" : "Сохранить копию")) {
+                    effect.name = effect.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    lamp.saveBacklightEffect(effect)
+                    dismiss()
+                }.keyboardShortcut(.defaultAction)
+                    .disabled(effect.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if lamp.savedBacklightEffects.contains(where: { $0.id == effect.id }) {
+                Button("Удалить", role: .destructive) {
+                    if lamp.playingBacklightEffect?.id == effect.id { lamp.stopBacklightEffect() }
+                    lamp.removeBacklightEffect(effect.id)
+                    dismiss()
+                }
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+        .background(RazerBackground())
+        .rgbGlass(radius: 18, prominent: true)
+        .onDisappear {
+            if previewed, lamp.playingBacklightEffect?.id == effect.id { lamp.stopBacklightEffect() }
+        }
+    }
+}
+
+
+private struct DeviceSetupGuide: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            step(1, "Установи Yeelight Classic", "Скачай приложение Yeelink на iPhone или Android.")
+            HStack(spacing: 16) {
+                Link("App Store", destination: URL(string: "https://apps.apple.com/app/yeelight-classic/id977125608")!)
+                Link("Google Play", destination: URL(string: "https://play.google.com/store/apps/details?id=com.yeelight.cherry")!)
+            }.padding(.leading, 34)
+
+            Divider()
+            step(2, "Подключи лампу к Wi‑Fi", "Подай питание на лампу. В Yeelight Classic нажми «+», выбери свою модель и следуй подсказкам. Для Screen Light Bar Pro выбери сеть 2,4 ГГц и введи пароль Wi‑Fi.")
+            step(3, "Включи LAN Control", "В Yeelight Classic открой «Устройства» → свою лампу → «Ещё» → «Управление по LAN» (LAN Control). Включи переключатель.")
+            step(4, "Найди лампу в YeelightBar", "Mac и лампа должны быть в одной домашней сети. Если macOS запросит доступ к локальной сети, разреши его. Запусти поиск и выбери лампу в списке.")
+
+            DisclosureGroup("Лампа не находится?") {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Проверь, что Mac в той же сети, лампа онлайн в Yeelight Classic, а LAN Control включён. Гостевая сеть может изолировать устройства.")
+                    Text("Если поиск не нашёл лампу, посмотри её IP в списке устройств роутера и введи его в «Добавить вручную по IP». Для подключения по IP тоже нужен LAN Control.")
+                    Text("Если переключателя LAN Control нет, проверь поддержку у своей модели в инструкции Yeelight.")
+                    Link("Инструкция по LAN Control", destination: URL(string: "https://www.yeelight.com/faqs/lan_control")!)
+                }.foregroundStyle(Color.razerSecondary).padding(.top, 6)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .rgbGlass(radius: 16)
+    }
+
+    private func step(_ number: Int, _ title: LocalizedStringKey, _ detail: LocalizedStringKey) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(verbatim: String(number)).font(.caption.weight(.semibold))
+                .frame(width: 24, height: 24)
+                .background(Color.razerGreen.opacity(0.12), in: Circle())
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                Text(detail).font(.callout).foregroundStyle(Color.razerSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
